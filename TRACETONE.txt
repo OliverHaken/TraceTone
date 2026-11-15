@@ -1,0 +1,876 @@
+# TraceTone v.16 * — Pythonista 3
+# Unclamped graph amplitudes, tap-to-draw points, and audio peak normalization.
+import ui, sound, console, dialogs, numpy as np
+import os, json, copy, math, tempfile, struct, wave
+try:
+    import clipboard
+except ImportError:
+    clipboard = None
+
+SR = 44100
+MAX_DUR = 5.0
+MAX_OUT = 20.0
+CYCLE_SECONDS = 2.0
+MAX_CURVATURE = 5.0
+LIB = os.path.expanduser('~/Documents/GraphSounds')
+TMP_WAV = os.path.join(tempfile.gettempdir(), 'tracetone_play.wav')
+CLIP_TAG = 'GraphSynthPoints:'
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+def finite(v, default=0.0):
+    try:
+        v = float(v)
+        return v if math.isfinite(v) else default
+    except (ValueError, TypeError, OverflowError):
+        return default
+
+def eval_curve(pts, t):
+    t = np.asarray(t, dtype=float)
+    out = np.zeros_like(t)
+    if len(pts) < 2:
+        return out
+    xs = np.array([p['x'] for p in pts], dtype=float)
+    ys = np.array([p['y'] for p in pts], dtype=float)
+    idx = np.searchsorted(xs, t, side='right') - 1
+    ok = (idx >= 0) & (idx < len(pts)-1)
+    if not np.any(ok):
+        return out
+    i = idx[ok]
+    dx = np.maximum(xs[i+1] - xs[i], 1e-9)
+    u = np.clip((t[ok]-xs[i])/dx, 0, 1)
+    s = u.copy()
+    for k, j in enumerate(i):
+        p = pts[j]
+        if p.get('mode') == 'curve':
+            strength = clamp(finite(p.get('curv', 1), 1), 0, MAX_CURVATURE)
+            polarity = -1 if finite(p.get('polarity', 1), 1) < 0 else 1
+            s[k] = u[k] + polarity*strength*math.sin(math.pi*u[k])/math.pi
+    out[ok] = ys[i] + (ys[i+1]-ys[i])*s
+    return out
+
+def normalize_audio(y):
+    y = np.nan_to_num(np.asarray(y, dtype=np.float64), nan=0., posinf=0., neginf=0.)
+    peak = np.max(np.abs(y)) if y.size else 0.
+    if peak > 1.0:
+        y = y / peak
+    return y
+
+def pcm16(y, endian='<'):
+    return (np.clip(normalize_audio(y), -1, 1)*32767).astype(endian+'i2')
+
+def write_wav(path, y):
+    with wave.open(path, 'wb') as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(SR)
+        f.writeframes(pcm16(y).tobytes())
+
+def extended80(value):
+    exponent = int(math.floor(math.log(value, 2)))
+    mantissa = int(value/(2.0**exponent)*2**63)
+    return struct.pack('>H', exponent+16383)+mantissa.to_bytes(8, 'big')
+
+def write_aiff(path, y):
+    data = pcm16(y, '>').tobytes()
+    comm = struct.pack('>hIh', 1, len(y), 16)+extended80(SR)
+    ssnd = struct.pack('>II', 0, 0)+data
+    chunks = b'COMM'+struct.pack('>I', len(comm))+comm
+    chunks += b'SSND'+struct.pack('>I', len(ssnd))+ssnd
+    form = b'AIFF'+chunks
+    with open(path, 'wb') as f:
+        f.write(b'FORM'+struct.pack('>I', len(form))+form)
+
+def write_midi(path, frequency, duration):
+    note = int(clamp(round(69+12*math.log(max(frequency, 1e-6)/440., 2)), 0, 127))
+    ticks = max(1, int(duration*960))
+    def vlq(n):
+        buf = [n & 127]
+        n >>= 7
+        while n:
+            buf.insert(0, (n & 127)|128)
+            n >>= 7
+        return bytes(buf)
+    track = bytearray(b'\x00\xff\x51\x03\x07\xa1\x20')
+    track += b'\x00\x90'+bytes([note, 100])
+    track += vlq(ticks)+b'\x80'+bytes([note, 0])
+    track += b'\x00\xff\x2f\x00'
+    with open(path, 'wb') as f:
+        f.write(b'MThd'+struct.pack('>IHHH', 6, 0, 1, 480))
+        f.write(b'MTrk'+struct.pack('>I', len(track))+track)
+
+def lib_names():
+    os.makedirs(LIB, exist_ok=True)
+    return sorted(f[:-5] for f in os.listdir(LIB) if f.endswith('.json'))
+
+class GraphView(ui.View):
+    PAD = 14
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.background_color = '#090D14'
+        self.x0, self.x1 = 0., app.duration
+        self.amp_view = 1.
+        self.hit = None
+        self.moved = False
+        self.snap = False
+        self.start = (0, 0)
+        self.pan0 = (0, 1)
+
+    def update_amp_view(self):
+        # Include curved overshoots, not only control points.
+        peak = max((abs(p['y']) for p in self.app.pts), default=0.)
+        if len(self.app.pts) > 1:
+            for p, q in zip(self.app.pts, self.app.pts[1:]):
+                if p.get('mode') == 'curve':
+                    strength = clamp(finite(p.get('curv', 1), 1), 0, MAX_CURVATURE)
+                    # Conservative upper bound for the sinusoidal curve.
+                    peak = max(peak, abs(p['y'])+abs(q['y']-p['y'])*(1+strength/math.pi))
+        self.amp_view = max(1., peak*1.15)
+
+    def to_px(self, x, y):
+        return ((x-self.x0)/max(self.x1-self.x0, 1e-9)*self.width,
+                self.height/2-y/self.amp_view*(self.height/2-self.PAD))
+
+    def from_px(self, px, py):
+        return (self.x0+px/max(self.width, 1)*(self.x1-self.x0),
+                (self.height/2-py)/max(self.height/2-self.PAD, 1)*self.amp_view)
+
+    def fit(self):
+        self.x0, self.x1 = 0., self.app.duration
+        self.set_needs_display()
+
+    def zoom(self, factor):
+        dur = self.app.duration
+        center = (self.x0+self.x1)/2
+        rng = clamp((self.x1-self.x0)*factor, .01, dur)
+        self.x0 = clamp(center-rng/2, 0, dur-rng)
+        self.x1 = self.x0+rng
+        self.set_needs_display()
+
+    def draw(self):
+        w, h = self.width, self.height
+        if w <= 0 or h <= 0:
+            return
+        self.update_amp_view()
+        for frac in (-1, -.5, 0, .5, 1):
+            yv = frac*self.amp_view
+            _, py = self.to_px(0, yv)
+            ui.set_color('#334155' if frac == 0 else '#1E293B')
+            p = ui.Path()
+            p.move_to(0, py)
+            p.line_to(w, py)
+            p.stroke()
+            ui.draw_string('%.3g' % yv, (3, py+1, 75, 13), ('<system>', 9), '#64748B')
+        span = max(self.x1-self.x0, 1e-9)
+        raw = span/6
+        mag = 10**math.floor(math.log10(max(raw, 1e-9)))
+        step = next((m*mag for m in (1, 2, 5, 10) if m*mag >= raw), 10*mag)
+        t = math.ceil(self.x0/step)*step
+        while t <= self.x1+1e-9:
+            px, _ = self.to_px(t, 0)
+            ui.set_color('#1E293B')
+            p = ui.Path()
+            p.move_to(px, 0)
+            p.line_to(px, h)
+            p.stroke()
+            ui.draw_string('%.3gs' % t, (px+3, h-14, 60, 12), ('<system>', 9), '#475569')
+            t += step
+        left = max(0, self.x0)
+        end = min(self.x1, self.app.end_x)
+        if end > left:
+            ts = np.linspace(left, end, max(2, int(w*(end-left)/span)))
+            ys = eval_curve(self.app.pts, ts)
+            path = ui.Path()
+            for i, (tx, yy) in enumerate(zip(ts, ys)):
+                px, py = self.to_px(tx, yy)
+                if i == 0: path.move_to(px, py)
+                else: path.line_to(px, py)
+            path.line_width = 2
+            ui.set_color('#4ADE80')
+            path.stroke()
+        if self.x0 <= self.app.end_x <= self.x1:
+            px, _ = self.to_px(self.app.end_x, 0)
+            ui.set_color('#FACC15')
+            p = ui.Path()
+            p.move_to(px, 0)
+            p.line_to(px, h)
+            p.stroke()
+            ui.draw_string('END', (px-19, 18, 38, 14), ('<system-bold>', 10), '#FACC15', alignment=ui.ALIGN_CENTER)
+        for i, p in enumerate(self.app.pts):
+            px, py = self.to_px(p['x'], p['y'])
+            if px < -10 or px > w+10:
+                continue
+            if i < len(self.app.pts)-1 and p.get('mode') == 'curve':
+                q = self.app.pts[i+1]
+                qx, qy = self.to_px((p['x']+q['x'])/2, (p['y']+q['y'])/2)
+                ui.draw_string('−' if p.get('polarity', 1) < 0 else '+',
+                               (qx-8, qy-22, 16, 16), ('<system-bold>', 13), '#F472B6')
+            r = 8 if p['id'] in self.app.sel else 5
+            ui.set_color('#FB923C' if p['id'] in self.app.sel else '#E2E8F0')
+            ui.Path.oval(px-r, py-r, 2*r, 2*r).fill()
+            if self.app.label_mode:
+                label = str(i+1) if self.app.label_mode == 1 else '(%.3g, %.3g)' % (p['x'], p['y'])
+                ui.draw_string(label, (px-52, py-25 if py > 34 else py+11, 104, 14),
+                               ('<system-bold>', 10), '#FDE68A', alignment=ui.ALIGN_CENTER)
+        status = 'DRAW ON' if self.app.draw_mode else 'SELECT'
+        ui.draw_string('%s  |  %d pts  |  %.3f–%.3f s' %
+                       (status, len(self.app.pts), self.x0, self.x1),
+                       (8, 4, w-16, 13), ('<system>', 10), '#94A3B8')
+
+    def nearest(self, px, py):
+        best, bd = None, 26**2
+        for p in self.app.pts:
+            qx, qy = self.to_px(p['x'], p['y'])
+            d = (qx-px)**2+(qy-py)**2
+            if d < bd:
+                best, bd = p, d
+        return best
+
+    def touch_began(self, t):
+        self.app.dismiss_kb()
+        self.update_amp_view()
+        px, py = t.location
+        self.hit = self.nearest(px, py)
+        self.start = (px, py)
+        self.moved = False
+        self.snap = False
+        self.pan0 = (self.x0, self.x1)
+
+    def touch_moved(self, t):
+        px, py = t.location
+        dx, dy = px-self.start[0], py-self.start[1]
+        if not self.moved and dx*dx+dy*dy < 64:
+            return
+        self.moved = True
+        if self.hit:
+            if not self.snap:
+                self.app.snapshot()
+                self.snap = True
+            x, y = self.from_px(px, py)
+            self.hit['x'] = clamp(x, 0, self.app.duration)
+            self.hit['y'] = y
+            self.app.pts.sort(key=lambda q: q['x'])
+            if len(self.app.sel) == 1 and self.hit['id'] in self.app.sel:
+                self.app.fill_boxes()
+        elif not self.app.draw_mode:
+            rng = self.pan0[1]-self.pan0[0]
+            x0 = self.pan0[0]-dx/max(self.width, 1)*rng
+            self.x0 = clamp(x0, 0, max(0, self.app.duration-rng))
+            self.x1 = self.x0+rng
+        self.set_needs_display()
+
+    def touch_ended(self, t):
+        if not self.moved:
+            if self.hit:
+                pid = self.hit['id']
+                if pid in self.app.sel: self.app.sel.discard(pid)
+                else: self.app.sel.add(pid)
+            elif self.app.draw_mode:
+                px, py = t.location
+                x, y = self.from_px(px, py)
+                self.app.insert_point(clamp(x, 0, self.app.duration), y)
+            else:
+                self.app.sel.clear()
+            self.app.on_sel_change()
+        self.hit = None
+        self.set_needs_display()
+
+class App(ui.View):
+    def __init__(self):
+        super().__init__()
+        self.name = 'TraceTone v.16'
+        self.background_color = '#0B0F14'
+        self.pts, self.sel, self.undo_stack = [], set(), []
+        self.uid = 0
+        self.curv = 1.
+        self.duration = self.end_x = 2.
+        self.pitch = 1.
+        self.fm_rate = self.fm_depth = 0.
+        self.cycle = True
+        self.freq = 220.
+        self.player = None
+        self.label_mode = 2
+        self.clip = None
+        self.rows = []
+        self.draw_mode = False
+        self.graph = GraphView(self)
+        self.add_subview(self.graph)
+        self.ctrl = ui.ScrollView()
+        self.ctrl.background_color = '#0F151E'
+        self.add_subview(self.ctrl)
+        self.build_controls()
+        self.update_labels()
+        self.update_polarity_button()
+
+    def new_pt(self, x, y, mode='line', curv=None, polarity=1):
+        self.uid += 1
+        return dict(id=self.uid, x=finite(x), y=finite(y), mode=mode,
+                    curv=clamp(finite(self.curv if curv is None else curv, 1), 0, MAX_CURVATURE),
+                    polarity=-1 if finite(polarity, 1) < 0 else 1)
+
+    def snapshot(self):
+        self.undo_stack.append(copy.deepcopy(self.pts))
+        if len(self.undo_stack) > 100: self.undo_stack.pop(0)
+
+    def sel_indices(self):
+        return [i for i, p in enumerate(self.pts) if p['id'] in self.sel]
+
+    def fill_boxes(self):
+        if len(self.sel) == 1:
+            p = next(q for q in self.pts if q['id'] in self.sel)
+            self.xf.text = '%.4f' % p['x']
+            self.yf.text = '%.4f' % p['y']
+
+    def dismiss_kb(self, sender=None):
+        self.xf.end_editing()
+        self.yf.end_editing()
+
+    def btn(self, title, action, bg='#1C2430', tc='#CBD5E1'):
+        b = ui.Button(title=title)
+        b.action = action
+        b.background_color = bg
+        b.tint_color = tc
+        b.corner_radius = 10
+        b.font = ('<system>', 13)
+        b.border_width = .5
+        b.border_color = '#263142'
+        self.ctrl.add_subview(b)
+        return b
+
+    def lbl(self, text=''):
+        l = ui.Label()
+        l.text = text
+        l.text_color = '#94A3B8'
+        l.font = ('<system>', 12)
+        self.ctrl.add_subview(l)
+        return l
+
+    def field(self, ph):
+        f = ui.TextField()
+        f.placeholder = ph
+        f.keyboard_type = ui.KEYBOARD_NUMBERS
+        f.background_color = 'white'
+        f.text_color = 'black'
+        f.tint_color = '#4ADE80'
+        f.corner_radius = 10
+        f.font = ('<system>', 13)
+        f.clear_button_mode = 'while_editing'
+        self.ctrl.add_subview(f)
+        return f
+
+    def slider(self, action, value):
+        s = ui.Slider()
+        s.value = clamp(value, 0, 1)
+        s.action = action
+        s.tint_color = '#4ADE80'
+        s.background_color = '#0B0F14'
+        self.ctrl.add_subview(s)
+        return s
+
+    def row(self, items, h=36):
+        self.rows.append((items, h))
+
+    def section_row(self, title):
+        l = self.lbl(title.upper())
+        l.text_color = '#64748B'
+        l.font = ('<system-bold>', 10)
+        self.row([(l, 1)], 18)
+
+    def numeric_button(self, key):
+        b = self.btn('123', lambda s, k=key: self.manual_slider(k), '#E5E7EB', 'black')
+        b.font = ('<system>', 11)
+        return b
+
+    def build_controls(self):
+        self.section_row('Edit points')
+        self.xf, self.yf = self.field('x (sec)'), self.field('Amplitude (any value)')
+        self.row([(self.xf, 1), (self.yf, 1),
+                  (self.btn('Add', self.add_point, '#1A3326', '#6EE7B7'), .8),
+                  (self.btn('Set', self.set_point), .7),
+                  (self.btn('Done', self.dismiss_kb), .9)], 38)
+        self.draw_b = self.btn('Draw Point: OFF', self.toggle_draw, '#243047', '#93C5FD')
+        self.row([(self.draw_b, 1)], 38)
+        self.row([(self.btn('Connect Line', lambda s: self.connect('line'), '#1E2A44', '#93C5FD'), 1),
+                  (self.btn('Connect Curve', lambda s: self.connect('curve'), '#19343A', '#5EEAD4'), 1)], 38)
+        self.polarity_b = self.btn('Polarity +/-', self.flip_polarity, '#221E35', '#D8B4FE')
+        self.row([(self.polarity_b, 1)], 36)
+        self.row([(self.btn('Undo', self.do_undo), 1),
+                  (self.btn('Delete', self.delete_sel, '#2A1C1C', '#FCA5A5'), 1),
+                  (self.btn('Clear', self.clear_all, '#2A1C1C', '#FCA5A5'), 1)], 36)
+        self.row([(self.btn('Copy', self.copy_sel, '#1E1C35', '#A5B4FC'), 1),
+                  (self.btn('Paste', self.paste_pts, '#1E1C35', '#A5B4FC'), 1)], 36)
+        self.section_row('Transport & view')
+        self.loop_sw = ui.Switch()
+        self.loop_sw.action = self.loop_changed
+        self.ctrl.add_subview(self.loop_sw)
+        self.row([(self.btn('Play', self.play, '#1A3326', '#6EE7B7'), 1.2),
+                  (self.btn('Stop', self.stop, '#331E1E', '#FCA5A5'), 1),
+                  (self.lbl('Loop'), .5), (self.loop_sw, .7)], 38)
+        self.row([(self.btn('Zoom -', lambda s: self.graph.zoom(2)), 1),
+                  (self.btn('Zoom +', lambda s: self.graph.zoom(.5)), 1),
+                  (self.btn('Fit', lambda s: self.graph.fit()), 1),
+                  (self.btn('Labels', self.cycle_labels, '#2A2418', '#FCD34D'), 1.1)], 36)
+        self.section_row('Timing')
+        self.dur_l = self.lbl()
+        self.dur_s = self.slider(self.dur_changed, (self.duration-.1)/4.9)
+        self.row([(self.dur_l, 1), (self.dur_s, 2), (self.numeric_button('duration'), .45)], 34)
+        self.end_l = self.lbl()
+        self.end_s = self.slider(self.end_changed, self.end_x/self.duration)
+        self.row([(self.end_l, 1), (self.end_s, 2), (self.numeric_button('end_x'), .45)], 34)
+        self.cycle_sw = ui.Switch()
+        self.cycle_sw.value = True
+        self.cycle_sw.action = self.cycle_changed
+        self.ctrl.add_subview(self.cycle_sw)
+        self.row([(self.lbl('Cycle mode (graph repeats as tone)'), 2), (self.cycle_sw, .7)], 36)
+        self.section_row('Synth')
+        self.freq_l = self.lbl()
+        self.freq_s = self.slider(self.freq_changed, math.log2(self.freq/55)/5)
+        self.row([(self.freq_l, 1), (self.freq_s, 2), (self.numeric_button('freq'), .45)], 34)
+        self.pitch_l = self.lbl()
+        self.pitch_s = self.slider(self.pitch_changed, .5)
+        self.row([(self.pitch_l, 1), (self.pitch_s, 2), (self.numeric_button('pitch'), .45)], 34)
+        self.rate_l = self.lbl()
+        self.rate_s = self.slider(self.rate_changed, 0)
+        self.row([(self.rate_l, 1), (self.rate_s, 2), (self.numeric_button('fm_rate'), .45)], 34)
+        self.depth_l = self.lbl()
+        self.depth_s = self.slider(self.depth_changed, 0)
+        self.row([(self.depth_l, 1), (self.depth_s, 2), (self.numeric_button('fm_depth'), .45)], 34)
+        self.section_row('Library')
+        self.row([(self.btn('Save to Library', self.save_sound, '#221E35', '#A78BFA'), 1.4),
+                  (self.btn('Library', self.show_library, '#221E35', '#A78BFA'), 1),
+                  (self.btn('Share', self.share_sound, '#14332F', '#5EEAD4'), 1)], 42)
+
+    def toggle_draw(self, sender):
+        self.draw_mode = not self.draw_mode
+        self.draw_b.title = 'Draw Point: ON' if self.draw_mode else 'Draw Point: OFF'
+        self.draw_b.background_color = '#1A4B36' if self.draw_mode else '#243047'
+        self.graph.set_needs_display()
+
+    def insert_point(self, x, y):
+        self.snapshot()
+        found = next((p for p in self.pts if abs(p['x']-x) < 1e-4), None)
+        if found:
+            found['y'] = y
+            self.sel = {found['id']}
+        else:
+            p = self.new_pt(x, y)
+            self.pts.append(p)
+            self.pts.sort(key=lambda q: q['x'])
+            self.sel = {p['id']}
+        self.on_sel_change()
+
+    def manual_slider(self, key):
+        settings = {
+            'duration': ('Duration in seconds', .1, MAX_DUR, self.duration),
+            'end_x': ('End X in seconds', .01, self.duration, self.end_x),
+            'freq': ('Frequency in Hz', 55, 1760, self.freq),
+            'pitch': ('Pitch multiplier', .25, 4, self.pitch),
+            'fm_rate': ('FM rate in Hz', 0, 20, self.fm_rate),
+            'fm_depth': ('FM depth (0 to 1)', 0, 1, self.fm_depth)
+        }
+        title, lo, hi, current = settings[key]
+        try:
+            entered = console.input_alert(title, 'Enter a number from %s to %s' % (lo, hi), str(current), 'Apply')
+        except KeyboardInterrupt:
+            return
+        try:
+            value = float(entered)
+            if not math.isfinite(value): raise ValueError()
+            value = clamp(value, lo, hi)
+        except (ValueError, TypeError):
+            console.hud_alert('Invalid number', 'error')
+            return
+        if key == 'duration':
+            self.dur_s.value = (value-.1)/4.9
+            self.dur_changed(self.dur_s)
+        elif key == 'end_x':
+            self.end_s.value = value/self.duration
+            self.end_changed(self.end_s)
+        elif key == 'freq':
+            self.freq_s.value = math.log2(value/55)/5
+            self.freq_changed(self.freq_s)
+        elif key == 'pitch':
+            self.pitch_s.value = math.log2(value)/4+.5
+            self.pitch_changed(self.pitch_s)
+        elif key == 'fm_rate':
+            self.rate_s.value = value/20
+            self.rate_changed(self.rate_s)
+        else:
+            self.depth_s.value = value
+            self.depth_changed(self.depth_s)
+
+    def layout(self):
+        w, h = self.width, self.height
+        if w > h:
+            sx, sy = 44, 47
+            usable_w, usable_h = w-88, h-68
+            gw = int(usable_w*.62)
+            self.graph.frame = (sx, sy, gw, usable_h)
+            self.ctrl.frame = (sx+gw+8, sy, usable_w-gw-8, usable_h)
+            cw, pad = usable_w-gw-8, 10
+        else:
+            sy = 47 if h > 700 else 0
+            gh = max(190, (h-sy)*.36)
+            self.graph.frame = (0, sy, w, gh)
+            self.ctrl.frame = (0, sy+gh, w, h-sy-gh)
+            cw, pad = w, 8
+        y = 8
+        for items, rh in self.rows:
+            total = sum(weight for _, weight in items)
+            avail = max(0, cw-pad*(len(items)+1))
+            x = pad
+            for v, weight in items:
+                vw = avail*weight/total
+                v.frame = (x, y, vw, rh)
+                x += vw+pad
+            y += rh+8
+        self.ctrl.content_size = (cw, y+40)
+
+    def update_labels(self):
+        self.dur_l.text = 'Length %.2f s' % self.duration
+        self.end_l.text = 'End X %.3f s' % self.end_x
+        self.freq_l.text = 'Frequency %.1f Hz' % self.freq
+        self.pitch_l.text = 'Pitch x%.3f' % self.pitch
+        self.rate_l.text = 'FM rate %.2f Hz' % self.fm_rate
+        self.depth_l.text = 'FM depth %d%%' % round(self.fm_depth*100)
+
+    def update_polarity_button(self):
+        curves = [p for p in self.pts[:-1] if p['id'] in self.sel and p.get('mode') == 'curve']
+        if not curves:
+            self.polarity_b.title = 'Polarity +/-'
+            return
+        signs = [-1 if p.get('polarity', 1) < 0 else 1 for p in curves]
+        self.polarity_b.title = ('Polarity +' if all(x == 1 for x in signs)
+                                 else 'Polarity −' if all(x == -1 for x in signs) else 'Polarity ±')
+
+    def cycle_labels(self, sender):
+        self.label_mode = (self.label_mode+1)%3
+        console.hud_alert(['Labels off', 'Point numbers', 'Coordinates'][self.label_mode])
+        self.graph.set_needs_display()
+
+    def read_boxes(self):
+        try:
+            x, y = float(self.xf.text), float(self.yf.text)
+            if not (math.isfinite(x) and math.isfinite(y)): raise ValueError()
+            return clamp(x, 0, self.duration), y
+        except (ValueError, TypeError):
+            console.hud_alert('Enter finite numbers for x and amplitude', 'error')
+            return None
+
+    def add_point(self, sender):
+        xy = self.read_boxes()
+        if xy is not None:
+            self.insert_point(*xy)
+            self.dismiss_kb()
+
+    def set_point(self, sender):
+        if len(self.sel) != 1:
+            console.hud_alert('Select exactly one point', 'error')
+            return
+        xy = self.read_boxes()
+        if xy is None: return
+        self.snapshot()
+        p = next(q for q in self.pts if q['id'] in self.sel)
+        p['x'], p['y'] = xy
+        self.pts.sort(key=lambda q: q['x'])
+        self.dismiss_kb()
+        self.on_sel_change()
+
+    def on_sel_change(self):
+        self.fill_boxes()
+        self.update_polarity_button()
+        self.graph.set_needs_display()
+
+    def connect(self, mode):
+        idx = self.sel_indices()
+        if len(idx) < 2:
+            console.hud_alert('Select 2+ points first', 'error')
+            return
+        self.snapshot()
+        for a, b in zip(idx, idx[1:]):
+            for i in range(a, b):
+                self.pts[i]['mode'] = mode
+                if mode == 'curve': self.pts[i]['curv'] = self.curv
+                self.pts[i].setdefault('polarity', 1)
+        self.update_polarity_button()
+        self.graph.set_needs_display()
+
+    def flip_polarity(self, sender):
+        curves = [p for p in self.pts[:-1] if p['id'] in self.sel and p.get('mode') == 'curve']
+        if not curves:
+            console.hud_alert('Select a curve starting point', 'error')
+            return
+        self.snapshot()
+        for p in curves:
+            p['polarity'] = -1 if p.get('polarity', 1) > 0 else 1
+        self.on_sel_change()
+
+    def do_undo(self, sender):
+        if not self.undo_stack:
+            console.hud_alert('Nothing to undo')
+            return
+        self.pts = self.undo_stack.pop()
+        self.sel &= {p['id'] for p in self.pts}
+        self.on_sel_change()
+
+    def delete_sel(self, sender):
+        if not self.sel: return
+        self.snapshot()
+        self.pts = [p for p in self.pts if p['id'] not in self.sel]
+        self.sel.clear()
+        self.on_sel_change()
+
+    def clear_all(self, sender):
+        if not self.pts: return
+        self.snapshot()
+        self.pts = []
+        self.sel.clear()
+        self.on_sel_change()
+
+    def copy_sel(self, sender):
+        idx = self.sel_indices()
+        if not idx:
+            console.hud_alert('Select points to copy', 'error')
+            return
+        x0 = self.pts[idx[0]]['x']
+        self.clip = [dict(dx=self.pts[i]['x']-x0, y=self.pts[i]['y'],
+                          mode=self.pts[i].get('mode', 'line'),
+                          curv=self.pts[i].get('curv', 1),
+                          polarity=self.pts[i].get('polarity', 1)) for i in idx]
+        if clipboard:
+            try: clipboard.set(CLIP_TAG+json.dumps(self.clip))
+            except Exception: pass
+        console.hud_alert('Copied %d points' % len(self.clip))
+
+    def get_clip(self):
+        if clipboard:
+            try:
+                s = clipboard.get()
+                if s and s.startswith(CLIP_TAG): return json.loads(s[len(CLIP_TAG):])
+            except Exception: pass
+        return self.clip
+
+    def paste_pts(self, sender):
+        clip = self.get_clip()
+        if not clip:
+            console.hud_alert('Nothing to paste', 'error')
+            return
+        idx = self.sel_indices()
+        base = self.pts[idx[-1]]['x'] if idx else self.graph.x0
+        new = [c for c in clip if 0 <= base+finite(c['dx']) <= self.duration+1e-9]
+        if not new:
+            console.hud_alert('No room here', 'error')
+            return
+        lo = min(base+finite(c['dx']) for c in new)
+        hi = max(base+finite(c['dx']) for c in new)
+        self.snapshot()
+        self.pts = [p for p in self.pts if not lo-1e-4 <= p['x'] <= hi+1e-4]
+        added = set()
+        for c in new:
+            p = self.new_pt(clamp(base+finite(c['dx']), 0, self.duration),
+                            finite(c['y']), c.get('mode', 'line'),
+                            c.get('curv', 1), c.get('polarity', 1))
+            self.pts.append(p)
+            added.add(p['id'])
+        self.pts.sort(key=lambda q: q['x'])
+        self.sel = added
+        self.on_sel_change()
+        console.hud_alert('Pasted %d points' % len(new))
+
+    def dur_changed(self, sender):
+        self.duration = round(.1+sender.value*4.9, 2)
+        self.end_x = clamp(self.end_x, .01, self.duration)
+        self.end_s.value = self.end_x/self.duration
+        self.graph.fit()
+        self.update_labels()
+
+    def end_changed(self, sender):
+        self.end_x = clamp(sender.value*self.duration, .01, self.duration)
+        self.update_labels()
+        self.graph.set_needs_display()
+
+    def freq_changed(self, sender):
+        self.freq = 55*2**(sender.value*5)
+        self.update_labels()
+
+    def cycle_changed(self, sender):
+        self.cycle = bool(sender.value)
+
+    def pitch_changed(self, sender):
+        self.pitch = 2**((sender.value-.5)*4)
+        self.update_labels()
+
+    def rate_changed(self, sender):
+        self.fm_rate = sender.value*20
+        self.update_labels()
+
+    def depth_changed(self, sender):
+        self.fm_depth = sender.value
+        self.update_labels()
+
+    def build_audio(self):
+        if len(self.pts) < 2: return None
+        end = clamp(self.end_x, .01, self.duration)
+        if self.cycle:
+            n = int(CYCLE_SECONDS*SR)
+            to = np.arange(n)/SR
+            inst = self.freq*self.pitch*(1+self.fm_depth*np.sin(2*np.pi*self.fm_rate*to))
+            phase = np.cumsum(np.maximum(inst, 0))/SR
+            read = (phase%1)*end
+            y = eval_curve(self.pts, read)
+        else:
+            speed_min = max(.02, self.pitch*(1-self.fm_depth))
+            n = int(min(MAX_OUT, end/speed_min)*SR)+1
+            to = np.arange(n)/SR
+            speed = self.pitch*(1+self.fm_depth*np.sin(2*np.pi*self.fm_rate*to))
+            read = np.cumsum(np.maximum(speed, .02))/SR
+            read = read[read < end]
+            if len(read) < 2: return None
+            y = eval_curve(self.pts, read)
+        y = np.array(y, dtype=np.float64, copy=True)
+        f = min(int(.003*SR), len(y)//2)
+        if f > 1:
+            ramp = np.linspace(0, 1, f)
+            y[:f] *= ramp
+            y[-f:] *= ramp[::-1]
+        return y
+
+    def play(self, sender):
+        self.stop(None)
+        y = self.build_audio()
+        if y is None:
+            console.hud_alert('Need at least 2 points', 'error')
+            return
+        write_wav(TMP_WAV, y)
+        self.player = sound.Player(TMP_WAV)
+        self.player.number_of_loops = -1 if self.loop_sw.value else 0
+        self.player.play()
+
+    def stop(self, sender):
+        if self.player:
+            try: self.player.stop()
+            except Exception: pass
+            self.player = None
+
+    def loop_changed(self, sender):
+        if self.player:
+            try: self.player.number_of_loops = -1 if sender.value else 0
+            except Exception: pass
+
+    def will_close(self):
+        self.stop(None)
+
+    def save_sound(self, sender):
+        try: name = console.input_alert('Save sound', 'Name', '', 'Save')
+        except KeyboardInterrupt: return
+        name = ''.join(c for c in name if c.isalnum() or c in ' _-').strip()
+        if not name: return
+        os.makedirs(LIB, exist_ok=True)
+        data = dict(points=self.pts, duration=self.duration, end_x=self.end_x,
+                    pitch=self.pitch, fm_rate=self.fm_rate, fm_depth=self.fm_depth,
+                    curv=self.curv, cycle=self.cycle, freq=self.freq)
+        with open(os.path.join(LIB, name+'.json'), 'w') as f:
+            json.dump(data, f)
+        y = self.build_audio()
+        if y is not None: write_wav(os.path.join(LIB, name+'.wav'), y)
+        console.hud_alert('Saved "%s"' % name)
+
+    def load_sound(self, name):
+        with open(os.path.join(LIB, name+'.json')) as f:
+            d = json.load(f)
+        self.snapshot()
+        self.pts = []
+        self.sel.clear()
+        for p in d['points']:
+            self.pts.append(self.new_pt(p['x'], p['y'], p.get('mode', 'line'),
+                                        p.get('curv', 1), p.get('polarity', 1)))
+        self.pts.sort(key=lambda q: q['x'])
+        self.duration = clamp(finite(d.get('duration', 2), 2), .1, MAX_DUR)
+        self.end_x = clamp(finite(d.get('end_x', self.duration), self.duration), .01, self.duration)
+        self.pitch = clamp(finite(d.get('pitch', 1), 1), .25, 4)
+        self.fm_rate = clamp(finite(d.get('fm_rate', 0)), 0, 20)
+        self.fm_depth = clamp(finite(d.get('fm_depth', 0)), 0, 1)
+        self.curv = clamp(finite(d.get('curv', 1), 1), 0, MAX_CURVATURE)
+        self.cycle = bool(d.get('cycle', False))
+        self.freq = clamp(finite(d.get('freq', 220), 220), 55, 1760)
+        self.dur_s.value = (self.duration-.1)/4.9
+        self.end_s.value = self.end_x/self.duration
+        self.pitch_s.value = clamp(math.log2(self.pitch)/4+.5, 0, 1)
+        self.rate_s.value = self.fm_rate/20
+        self.depth_s.value = self.fm_depth
+        self.freq_s.value = clamp(math.log2(self.freq/55)/5, 0, 1)
+        self.cycle_sw.value = self.cycle
+        self.update_labels()
+        self.update_polarity_button()
+        self.graph.fit()
+
+    def show_library(self, sender):
+        names = lib_names()
+        if not names:
+            console.hud_alert('Library is empty')
+            return
+        tv = ui.TableView()
+        tv.name = 'Sound Library'
+        tv.background_color = 'white'
+        ds = ui.ListDataSource(names)
+        ds.text_color = 'black'
+        ds.delete_enabled = True
+        def picked(src):
+            row = src.selected_row
+            if row is not None and row >= 0:
+                self.load_sound(src.items[row])
+                tv.close()
+        def edited(src):
+            keep = set(src.items)
+            for n in lib_names():
+                if n not in keep:
+                    for ext in ('.json', '.wav'):
+                        p = os.path.join(LIB, n+ext)
+                        if os.path.exists(p): os.remove(p)
+        ds.action = picked
+        ds.edit_action = edited
+        tv.data_source = ds
+        tv.delegate = ds
+        tv.present('sheet')
+
+    def ask_name(self, title):
+        try: name = console.input_alert(title, 'Enter a name', 'TraceTone Instrument', 'Export')
+        except KeyboardInterrupt: return None
+        if not name: return None
+        return ''.join(c for c in name if c.isalnum() or c in ' _-').strip() or None
+
+    def get_export_audio(self):
+        y = self.build_audio()
+        if y is None or len(y) < 2:
+            console.alert('Cannot Export', 'Create at least two graph points first.', 'OK')
+            return None
+        return y
+
+    def share_sound(self, sender):
+        try: choice = dialogs.list_dialog('Export Instrument', ['.wav', '.aiff', '.mid'])
+        except Exception as e:
+            console.alert('Export Menu Error', str(e), 'OK')
+            return
+        if choice in ('.wav', '.aiff', '.mid'):
+            self.export_file(choice)
+
+    def export_file(self, ext):
+        y = self.get_export_audio()
+        if y is None: return
+        name = self.ask_name('Export '+ext.upper())
+        if not name: return
+        path = os.path.join(tempfile.gettempdir(), name+ext)
+        try:
+            if ext == '.wav': write_wav(path, y)
+            elif ext == '.aiff': write_aiff(path, y)
+            else: write_midi(path, self.freq*self.pitch, len(y)/SR)
+            console.open_in(path)
+            if ext == '.mid':
+                console.alert('MIDI Exported', 'MIDI contains one note at the current pitch. It does not contain graph automation.', 'OK')
+        except Exception as e:
+            console.alert('Export Error', str(e), 'OK')
+
+if __name__ == '__main__':
+    App().present('fullscreen')
