@@ -81,6 +81,15 @@ export function confirmDialog({ title, message = '', ok = 'OK', danger = false }
   }).then((v) => v === true);
 }
 
+export function alertDialog({ title, message = '', ok = 'OK' }) {
+  return modal((dlg, close) => {
+    dlg.append(
+      h('h3', {}, title),
+      message ? h('p', {}, message) : null,
+      buttons(h('button', { type: 'button', class: 'btn primary', autofocus: '', onclick: () => close(true) }, ok)));
+  });
+}
+
 // items: [{label, value, sub?}]; onDelete(value) -> Promise<boolean> removes a row when it resolves true.
 export function listDialog({ title, items, onDelete = null, empty = 'Nothing here' }) {
   return modal((dlg, close) => {

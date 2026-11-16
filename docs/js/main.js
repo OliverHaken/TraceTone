@@ -1,8 +1,11 @@
 // TraceTone web: bootstraps the app and wires the DOM to the state layer.
-import { PARAMS, paramRange, clamp, finite } from './params.js';
+import { PARAMS, paramRange, clamp, finite, sanitizeName, SR } from './params.js';
 import * as S from './state.js';
 import { Graph } from './graph.js';
-import { toast, listDialog, isDialogOpen } from './ui.js';
+import { toast, listDialog, isDialogOpen, promptDialog, confirmDialog, alertDialog } from './ui.js';
+import { encodeWav, encodeAiff, encodeMidi } from './encoders.js';
+import { soundToJSON } from './serialize.js';
+import * as lib from './library.js';
 import { buildAudio } from './synth.js';
 import * as audio from './audio.js';
 
@@ -199,6 +202,51 @@ const actions = {
     changed('view');
     hooks.afterView?.();
   },
+  // ---- library / files ----
+  async save() {
+    const raw = await promptDialog({ title: 'Save sound', message: 'Name', ok: 'Save' });
+    const name = sanitizeName(raw);
+    if (!name) return;
+    if (lib.hasSound(name) && !await confirmDialog({ title: `Replace "${name}"?`, message: 'A sound with this name is already in the library.', ok: 'Replace', danger: true })) return;
+    if (lib.saveSound(name, state)) toast(`Saved "${name}"`);
+  },
+  async library() {
+    const entries = lib.libraryEntries();
+    if (!entries.length) return toast('Library is empty');
+    const name = await listDialog({
+      title: 'Sound Library',
+      items: entries.map((e) => ({ label: e.name, value: e.name, sub: e.saved ? new Date(e.saved).toLocaleString() : null })),
+      onDelete: async (n) => {
+        if (!await confirmDialog({ title: `Delete "${n}"?`, message: 'This cannot be undone.', ok: 'Delete', danger: true })) return false;
+        return lib.deleteSound(n);
+      },
+    });
+    if (name == null) return;
+    const sound = lib.getSound(name);
+    if (!sound) return toast('Could not load that sound', 'error');
+    loadData(sound);
+  },
+  async share() {
+    const ext = await listDialog({
+      title: 'Export Instrument',
+      items: [
+        { label: '.wav', value: '.wav', sub: '16-bit mono, 44.1 kHz' },
+        { label: '.aiff', value: '.aiff', sub: '16-bit mono, 44.1 kHz' },
+        { label: '.mid', value: '.mid', sub: 'One note at the current pitch' },
+        { label: '.json', value: '.json', sub: 'TraceTone sound (points + settings)' },
+      ],
+    });
+    if (ext) await exportFile(ext);
+  },
+  import() { $('#import-file').click(); },
+  new() {
+    audio.stop();
+    S.newSession(state);
+    graph.fit();
+    fillBoxes();
+    changed();
+    toast('New sound (Undo restores the previous one)');
+  },
   'select-all'() { S.selectAll(state); changed('select'); },
   deselect() { state.sel.clear(); changed('select'); },
   help() {
@@ -219,6 +267,66 @@ document.addEventListener('click', (e) => {
 
 xf.addEventListener('keydown', (e) => { if (e.key === 'Enter') actions.add(); });
 yf.addEventListener('keydown', (e) => { if (e.key === 'Enter') actions.add(); });
+
+function loadData(data) {
+  try {
+    S.loadSound(state, data);
+  } catch (e) {
+    toast(`Could not load: ${e.message}`, 'error');
+    return false;
+  }
+  graph.fit();
+  fillBoxes();
+  changed();
+  return true;
+}
+
+const MIME = { '.wav': 'audio/wav', '.aiff': 'audio/aiff', '.mid': 'audio/midi', '.json': 'application/json' };
+
+async function exportFile(ext) {
+  let y = null;
+  if (ext !== '.json') {
+    y = buildAudio(state, { forExport: true });
+    if (!y || y.length < 2) {
+      return alertDialog({ title: 'Cannot Export', message: 'Create at least two graph points first.' });
+    }
+  }
+  const raw = await promptDialog({ title: `Export ${ext.toUpperCase()}`, message: 'Enter a name', value: 'TraceTone Instrument', ok: 'Export' });
+  const name = sanitizeName(raw);
+  if (!name) return;
+  let bytes;
+  if (ext === '.wav') bytes = encodeWav(y);
+  else if (ext === '.aiff') bytes = encodeAiff(y);
+  else if (ext === '.mid') bytes = encodeMidi(state.freq * state.pitch, y.length / SR);
+  else bytes = new TextEncoder().encode(JSON.stringify(soundToJSON(state)));
+  try {
+    const how = await lib.deliverFile(bytes, name + ext, MIME[ext]);
+    if (how === 'cancelled') return;
+    if (ext === '.mid') {
+      await alertDialog({ title: 'MIDI Exported', message: 'MIDI contains one note at the current pitch. It does not contain graph automation.' });
+    }
+  } catch (e) {
+    alertDialog({ title: 'Export Error', message: String(e?.message ?? e) });
+  }
+}
+
+$('#import-file').addEventListener('change', async (e) => {
+  const input = e.target;
+  const file = input.files?.[0];
+  input.value = ''; // allow re-importing the same file
+  if (!file) return;
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch {
+    return toast('That file is not valid JSON', 'error');
+  }
+  if (!loadData(data)) return;
+  const name = sanitizeName(file.name.replace(/\.json$/i, ''));
+  if (name && await confirmDialog({ title: 'Add to library?', message: `Save the imported sound as "${name}"${lib.hasSound(name) ? ' (replaces the existing one)' : ''}.`, ok: 'Add' })) {
+    if (lib.saveSound(name, state)) toast(`Saved "${name}"`);
+  }
+});
 
 // ---- keyboard shortcuts -----------------------------------------------------------------------
 
@@ -262,8 +370,33 @@ document.addEventListener('keydown', (e) => {
 
 $('#version').textContent = APP_VERSION;
 $('#foot-version').textContent = `TraceTone ${APP_VERSION} (based on v.16)`;
+lib.setStorageErrorListener(() => toast('Browser storage unavailable: changes won\'t be kept', 'error'));
+hooks.afterEdit = () => lib.scheduleSessionSave(state);
+hooks.afterView = () => lib.scheduleSessionSave(state, 1000);
+window.addEventListener('pagehide', () => lib.flushSession());
+document.addEventListener('visibilitychange', () => { if (document.hidden) lib.flushSession(); });
+
+function restoreSession() {
+  const sess = lib.loadSession();
+  if (!sess?.sound) return false;
+  try {
+    S.loadSound(state, sess.sound);
+  } catch {
+    return false;
+  }
+  state.undo = [];
+  if ([0, 1, 2].includes(sess.label_mode)) state.label_mode = sess.label_mode;
+  const v = sess.view;
+  if (v && Number.isFinite(v.x0) && Number.isFinite(v.x1) && v.x1 > v.x0) {
+    state.view.x0 = v.x0;
+    state.view.x1 = v.x1;
+    graph.clampView();
+  } else graph.fit();
+  return true;
+}
+
+if (!restoreSession()) graph.fit();
 syncUI();
-graph.fit();
 window.TraceTone = { state, graph, actions, version: APP_VERSION }; // for debugging from the console
 
 export { state, graph, actions, hooks, changed, report, fillBoxes, syncUI };
