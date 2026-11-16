@@ -3,6 +3,8 @@ import { PARAMS, paramRange, clamp, finite } from './params.js';
 import * as S from './state.js';
 import { Graph } from './graph.js';
 import { toast, listDialog, isDialogOpen } from './ui.js';
+import { buildAudio } from './synth.js';
+import * as audio from './audio.js';
 
 export const APP_VERSION = 'web 1.0';
 
@@ -109,6 +111,21 @@ for (const row of paramRows) {
   num.addEventListener('blur', () => syncParam(row));
 }
 
+$('#loop-sw').addEventListener('change', (e) => audio.setLoop(e.target.checked));
+audio.setStateListener((playing) => $('#play-b').classList.toggle('playing', playing));
+window.addEventListener('pagehide', () => audio.stop());
+
+// iOS without navigator.audioSession: Web Audio is muted by the ringer switch. Say so once.
+function silentSwitchHint() {
+  const iOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (!iOS || audio.hasAudioSession()) return;
+  try {
+    if (localStorage.getItem('tracetone.hint.silent')) return;
+    localStorage.setItem('tracetone.hint.silent', '1');
+  } catch { /* storage unavailable: show every time is fine */ }
+  setTimeout(() => toast('No sound? Turn off silent mode (ringer switch).'), 600);
+}
+
 $('#cycle-sw').addEventListener('change', (e) => {
   S.snapshot(state);
   applyParam('cycle', e.target.checked);
@@ -164,6 +181,15 @@ const actions = {
     }
     if (!report(S.paste(state, clip))?.error) { fillBoxes(); changed(); }
   },
+  play() {
+    try { audio.unlock(); } catch (e) { return toast(e.message, 'error'); } // must run inside the gesture
+    const y = buildAudio(state);
+    if (!y) return toast('Need at least 2 points', 'error');
+    audio.play(y, $('#loop-sw').checked);
+    silentSwitchHint();
+  },
+  stop: () => audio.stop(),
+  'toggle-play'() { if (audio.isPlaying()) actions.stop(); else actions.play(); },
   'zoom-out': () => graph.zoom(2),
   'zoom-in': () => graph.zoom(0.5),
   fit: () => graph.fit(),
