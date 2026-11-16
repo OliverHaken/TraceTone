@@ -84,6 +84,7 @@ LOAD_CASES = [
                                   dict(x=0.1, y=-1e3, curv=-2, polarity=0)],
                           duration=9, end_x=99, pitch=0.01, fm_rate=-3, fm_depth=2, curv=7, freq=5000,
                           cycle=True)),
+    ('point_curv_missing', dict(points=[dict(x=0, y=0, mode='curve'), dict(x=1, y=1)], curv=4)),
     ('nulls', dict(points=[dict(x=0.2, y=0.1)], duration=None, end_x=None, pitch=None, freq='abc')),
 ]
 

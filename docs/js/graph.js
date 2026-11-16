@@ -252,6 +252,7 @@ export class Graph {
 
     if (this.pointers.size === 2) {
       // Second finger: switch to pinch zoom (ends any drag/pan in progress; edits so far are kept).
+      if (this.g?.snap) this.hooks.onEdit?.();
       const [a, b] = [...this.pointers.values()];
       const mid = (a.x + b.x) / 2;
       this.g = {

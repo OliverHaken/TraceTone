@@ -31,9 +31,10 @@ function write(key, value) {
 
 // ---- library ----------------------------------------------------------------------------------
 
+// Null-prototype object so names like "__proto__" are ordinary keys.
 const lib = () => {
   const l = read(LIB_KEY);
-  return l && typeof l === 'object' && !Array.isArray(l) ? l : {};
+  return Object.assign(Object.create(null), l && typeof l === 'object' && !Array.isArray(l) ? l : {});
 };
 
 export function libraryEntries() {

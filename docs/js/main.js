@@ -97,7 +97,8 @@ for (const row of paramRows) {
     applyParam(key, PARAMS[key].fromSlider(Number(range.value), state));
     syncParam(row);
   });
-  range.addEventListener('change', () => { gesture = false; });
+  // 'change' doesn't fire if the value ends where it started, so also end the gesture on release/blur.
+  for (const ev of ['change', 'pointerup', 'pointercancel', 'blur']) range.addEventListener(ev, () => { gesture = false; });
   num.addEventListener('change', () => {
     const v = finite(num.value, NaN);
     if (!Number.isFinite(v)) {
@@ -209,6 +210,7 @@ const actions = {
     if (!name) return;
     if (lib.hasSound(name) && !await confirmDialog({ title: `Replace "${name}"?`, message: 'A sound with this name is already in the library.', ok: 'Replace', danger: true })) return;
     if (lib.saveSound(name, state)) toast(`Saved "${name}"`);
+    else toast('Could not save: browser storage is unavailable or full', 'error');
   },
   async library() {
     const entries = lib.libraryEntries();
@@ -218,7 +220,9 @@ const actions = {
       items: entries.map((e) => ({ label: e.name, value: e.name, sub: e.saved ? new Date(e.saved).toLocaleString() : null })),
       onDelete: async (n) => {
         if (!await confirmDialog({ title: `Delete "${n}"?`, message: 'This cannot be undone.', ok: 'Delete', danger: true })) return false;
-        return lib.deleteSound(n);
+        if (lib.deleteSound(n)) return true;
+        toast('Could not delete: browser storage is unavailable', 'error');
+        return false;
       },
     });
     if (name == null) return;
@@ -325,6 +329,7 @@ $('#import-file').addEventListener('change', async (e) => {
   const name = sanitizeName(file.name.replace(/\.json$/i, ''));
   if (name && await confirmDialog({ title: 'Add to library?', message: `Save the imported sound as "${name}"${lib.hasSound(name) ? ' (replaces the existing one)' : ''}.`, ok: 'Add' })) {
     if (lib.saveSound(name, state)) toast(`Saved "${name}"`);
+    else toast('Could not save: browser storage is unavailable or full', 'error');
   }
 });
 

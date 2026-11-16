@@ -26,7 +26,7 @@ export function parseSound(d) {
       x: finite(p.x),
       y: finite(p.y),
       mode: p.mode === 'curve' ? 'curve' : 'line',
-      curv: clamp(finite(p.curv ?? curv, 1), 0, MAX_CURVATURE),
+      curv: clamp(finite(p.curv ?? 1, 1), 0, MAX_CURVATURE), // v.16: p.get('curv', 1)
       polarity: sign(p.polarity ?? 1),
     }))
     .sort((a, b) => a.x - b.x);
