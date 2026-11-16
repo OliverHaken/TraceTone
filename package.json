@@ -1,0 +1,11 @@
+{
+  "name": "tracetone",
+  "private": true,
+  "type": "module",
+  "description": "TraceTone web port (no build step; the site is in docs/)",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "fixtures": "python3 tests/gen_fixtures.py",
+    "serve": "python3 -m http.server -d docs 8000"
+  }
+}
