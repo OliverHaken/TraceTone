@@ -132,6 +132,10 @@ export class Graph {
     };
     const text = (str, x, y, color, font, align = 'left') => {
       ctx.fillStyle = color; ctx.font = font; ctx.textAlign = align;
+      if (align === 'center') { // keep centered labels fully inside the canvas
+        const half = ctx.measureText(str).width / 2 + 2;
+        x = Math.max(half, Math.min(w - half, x));
+      }
       ctx.fillText(str, x, y);
     };
 
@@ -215,6 +219,10 @@ export class Graph {
 
     // Status line
     const status = s.draw_mode ? 'DRAW ON' : 'SELECT';
+    ctx.font = FONT(10);
+    const statusText = `${status}  |  ${pts.length} pts  |  ${x0.toFixed(3)}–${x1.toFixed(3)} s`;
+    ctx.fillStyle = 'rgba(9, 13, 20, 0.75)';
+    ctx.fillRect(4, 2, ctx.measureText(statusText).width + 8, 15);
     text(`${status}  |  ${pts.length} pts  |  ${x0.toFixed(3)}–${x1.toFixed(3)} s`, 8, 4, C.status, FONT(10));
   }
 

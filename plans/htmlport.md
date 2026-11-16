@@ -1,6 +1,6 @@
 # TraceTone → HTML/CSS/JS port plan
 
-Status: **plan agreed, not started**. All decisions are resolved (see §1 and §7).
+Status: **phases 0–6 implemented** on branch `html-port`. Phase 7 (manual device testing) remains. All decisions are resolved (see §1 and §7).
 Source of truth for behavior: `TRACETONE.txt` (TraceTone v.16, Pythonista 3). It stays where it is, unchanged.
 
 ## 1. Goal and decisions
