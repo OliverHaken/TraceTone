@@ -1,0 +1,246 @@
+[
+ {
+  "name": "normal",
+  "input": {
+   "points": [
+    {
+     "id": 4,
+     "x": 0.0,
+     "y": 0.0,
+     "mode": "line",
+     "curv": 1,
+     "polarity": 1
+    },
+    {
+     "id": 7,
+     "x": 1.5,
+     "y": -2.5,
+     "mode": "curve",
+     "curv": 2.0,
+     "polarity": -1
+    },
+    {
+     "id": 2,
+     "x": 0.75,
+     "y": 1.25,
+     "mode": "curve",
+     "curv": 4.5,
+     "polarity": 1
+    }
+   ],
+   "duration": 1.75,
+   "end_x": 1.5,
+   "pitch": 1.25,
+   "fm_rate": 6.5,
+   "fm_depth": 0.4,
+   "curv": 2.0,
+   "cycle": false,
+   "freq": 330.0
+  },
+  "expected": {
+   "points": [
+    {
+     "x": 0.0,
+     "y": 0.0,
+     "mode": "line",
+     "curv": 1.0,
+     "polarity": 1
+    },
+    {
+     "x": 0.75,
+     "y": 1.25,
+     "mode": "curve",
+     "curv": 4.5,
+     "polarity": 1
+    },
+    {
+     "x": 1.5,
+     "y": -2.5,
+     "mode": "curve",
+     "curv": 2.0,
+     "polarity": -1
+    }
+   ],
+   "duration": 1.75,
+   "end_x": 1.5,
+   "pitch": 1.25,
+   "fm_rate": 6.5,
+   "fm_depth": 0.4,
+   "curv": 2.0,
+   "cycle": false,
+   "freq": 330.0
+  }
+ },
+ {
+  "name": "minimal",
+  "input": {
+   "points": [
+    {
+     "x": 0,
+     "y": 1
+    },
+    {
+     "x": 1,
+     "y": -1
+    }
+   ]
+  },
+  "expected": {
+   "points": [
+    {
+     "x": 0.0,
+     "y": 1.0,
+     "mode": "line",
+     "curv": 1.0,
+     "polarity": 1
+    },
+    {
+     "x": 1.0,
+     "y": -1.0,
+     "mode": "line",
+     "curv": 1.0,
+     "polarity": 1
+    }
+   ],
+   "duration": 2.0,
+   "end_x": 2.0,
+   "pitch": 1.0,
+   "fm_rate": 0,
+   "fm_depth": 0,
+   "curv": 1.0,
+   "cycle": false,
+   "freq": 220.0
+  }
+ },
+ {
+  "name": "out_of_range",
+  "input": {
+   "points": [
+    {
+     "x": "0.5",
+     "y": "2",
+     "mode": "weird",
+     "curv": 9,
+     "polarity": -3
+    },
+    {
+     "x": 0.1,
+     "y": -1000.0,
+     "curv": -2,
+     "polarity": 0
+    }
+   ],
+   "duration": 9,
+   "end_x": 99,
+   "pitch": 0.01,
+   "fm_rate": -3,
+   "fm_depth": 2,
+   "curv": 7,
+   "freq": 5000,
+   "cycle": true
+  },
+  "expected": {
+   "points": [
+    {
+     "x": 0.1,
+     "y": -1000.0,
+     "mode": "line",
+     "curv": 0,
+     "polarity": 1
+    },
+    {
+     "x": 0.5,
+     "y": 2.0,
+     "mode": "line",
+     "curv": 5.0,
+     "polarity": -1
+    }
+   ],
+   "duration": 5.0,
+   "end_x": 5.0,
+   "pitch": 0.25,
+   "fm_rate": 0,
+   "fm_depth": 1,
+   "curv": 5.0,
+   "cycle": true,
+   "freq": 1760
+  }
+ },
+ {
+  "name": "point_curv_missing",
+  "input": {
+   "points": [
+    {
+     "x": 0,
+     "y": 0,
+     "mode": "curve"
+    },
+    {
+     "x": 1,
+     "y": 1
+    }
+   ],
+   "curv": 4
+  },
+  "expected": {
+   "points": [
+    {
+     "x": 0.0,
+     "y": 0.0,
+     "mode": "curve",
+     "curv": 1.0,
+     "polarity": 1
+    },
+    {
+     "x": 1.0,
+     "y": 1.0,
+     "mode": "line",
+     "curv": 1.0,
+     "polarity": 1
+    }
+   ],
+   "duration": 2.0,
+   "end_x": 2.0,
+   "pitch": 1.0,
+   "fm_rate": 0,
+   "fm_depth": 0,
+   "curv": 4.0,
+   "cycle": false,
+   "freq": 220.0
+  }
+ },
+ {
+  "name": "nulls",
+  "input": {
+   "points": [
+    {
+     "x": 0.2,
+     "y": 0.1
+    }
+   ],
+   "duration": null,
+   "end_x": null,
+   "pitch": null,
+   "freq": "abc"
+  },
+  "expected": {
+   "points": [
+    {
+     "x": 0.2,
+     "y": 0.1,
+     "mode": "line",
+     "curv": 1.0,
+     "polarity": 1
+    }
+   ],
+   "duration": 2,
+   "end_x": 2,
+   "pitch": 1,
+   "fm_rate": 0,
+   "fm_depth": 0,
+   "curv": 1.0,
+   "cycle": false,
+   "freq": 220
+  }
+ }
+]

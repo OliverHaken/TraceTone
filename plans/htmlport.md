@@ -1,6 +1,6 @@
 # TraceTone → HTML/CSS/JS port plan
 
-Status: **plan agreed, not started**. All decisions are resolved (see §1 and §7).
+Status: **phases 0–6 implemented** on branch `html-port`. Phase 7 (manual device testing) remains. All decisions are resolved (see §1 and §7).
 Source of truth for behavior: `TRACETONE.txt` (TraceTone v.16, Pythonista 3). It stays where it is, unchanged.
 
 ## 1. Goal and decisions
@@ -52,12 +52,14 @@ The line numbers refer to `TRACETONE.txt`.
 ### 3.2 Seamless cycle-mode loop
 v.16 builds a 2 s buffer and fades both ends by 3 ms, so a looped tone dips every 2 s. With FM on, the phase also jumps at the seam.
 - **No fades in cycle mode.** Instead, short gain ramps (3 ms) on a `GainNode` at Play and Stop prevent clicks at start and stop.
-- **Buffer length is a whole number of FM periods.** If `fm_rate·fm_depth > 0`, use `N = round(k·SR/fm_rate)`,
-  where k is the integer number of FM cycles nearest to 2 s (at least 1). For very slow FM (rate < 0.05 Hz,
-  more than 20 s for one period), cap at 20 s and accept a seam. With no FM, N = 2 s.
-- **Total carrier phase is a whole number of cycles.** After computing the cumulative phase over N samples, scale
-  the instantaneous frequency by `round(Φ)/Φ`, where Φ is the total phase. The pitch error is below half a cycle
-  over the buffer, which is at most 0.25 Hz for a 2 s buffer, so it is inaudible.
+- **The buffer holds whole carrier cycles and whole FM cycles.** The target length is 2 s, or, with FM on,
+  k FM periods, where k is the integer nearest to 2·rate (at least 1). The buffer is `C` whole carrier cycles
+  closest to that target, `N = round(C·SR/f0)`. The FM rate is then nudged to exactly `k·SR/N`; the error is
+  under 2%, and a change that small in vibrato rate can't be heard. A final carrier scale `round(Φ)/Φ` (≈1 ± 1e-5)
+  absorbs the rounding of N to whole samples, so the pitch is effectively exact. For very slow FM (rate < 0.05 Hz,
+  where one period is longer than 20 s), use about 20 s and accept an FM seam.
+  *(Revised during implementation: an earlier version scaled the pitch to fit a fixed 2 s buffer, which was up
+  to 2% flat at 13.75 Hz.)*
 - The phase starts at 0, so sample 0 and sample N continue each other with no discontinuity.
 - **Exports in cycle mode** (WAV/AIFF) use the same seamless buffer, plus a 3 ms fade in and out on the exported
   file only, so the file starts and ends cleanly (decided, §7).

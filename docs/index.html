@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0B0F14">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="TraceTone: draw a waveform with points and curves, then play it as a tone or a sample.">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>TraceTone</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="css/app.css">
+<script type="module" src="js/main.js"></script>
+</head>
+<body>
+<div id="app">
+  <header class="bar">
+    <h1>TraceTone</h1>
+    <span class="ver" id="version"></span>
+  </header>
+
+  <main class="layout">
+    <section class="graph-wrap">
+      <canvas id="graph" aria-label="Waveform graph. Tap to select points; drag to move or pan."></canvas>
+    </section>
+
+    <section class="controls" id="controls" aria-label="Controls">
+      <h2>Edit points</h2>
+      <div class="row">
+        <input id="xf" class="field" type="number" step="any" inputmode="decimal" placeholder="x (sec)" aria-label="x in seconds" style="flex:1">
+        <input id="yf" class="field" type="number" step="any" placeholder="Amplitude (any value)" aria-label="Amplitude" style="flex:1">
+        <button class="btn" data-action="add" style="flex:.8;--b:#1A3326;--f:#6EE7B7">Add</button>
+        <button class="btn" data-action="set" style="flex:.7">Set</button>
+        <button class="btn" data-action="done" style="flex:.9">Done</button>
+      </div>
+      <div class="row">
+        <button class="btn" id="draw-b" data-action="draw" aria-pressed="false" style="--b:#243047;--f:#93C5FD">Draw Point: OFF</button>
+      </div>
+      <div class="row">
+        <button class="btn" data-action="line" style="--b:#1E2A44;--f:#93C5FD">Connect Line</button>
+        <button class="btn" data-action="curve" style="--b:#19343A;--f:#5EEAD4">Connect Curve</button>
+      </div>
+      <div class="row param" data-param="curv">
+        <label for="p-curv">Curve <small>k</small></label>
+        <input id="p-curv" type="range" min="0" max="1" step="any">
+        <input type="number" class="num" step="any" inputmode="decimal" aria-label="Curvature value">
+      </div>
+      <div class="row">
+        <button class="btn" id="polarity-b" data-action="polarity" style="--b:#221E35;--f:#D8B4FE">Polarity +/-</button>
+      </div>
+      <div class="row">
+        <button class="btn" data-action="undo">Undo</button>
+        <button class="btn" data-action="delete" style="--b:#2A1C1C;--f:#FCA5A5">Delete</button>
+        <button class="btn" data-action="clear" style="--b:#2A1C1C;--f:#FCA5A5">Clear</button>
+      </div>
+      <div class="row">
+        <button class="btn" data-action="copy" style="--b:#1E1C35;--f:#A5B4FC">Copy</button>
+        <button class="btn" data-action="paste" style="--b:#1E1C35;--f:#A5B4FC">Paste</button>
+      </div>
+
+      <h2>Transport &amp; view</h2>
+      <div class="row">
+        <button class="btn" id="play-b" data-action="play" style="flex:1.2;--b:#1A3326;--f:#6EE7B7">Play</button>
+        <button class="btn" data-action="stop" style="--b:#331E1E;--f:#FCA5A5">Stop</button>
+        <label class="switch-row" style="flex:1.2">Loop
+          <span class="switch"><input type="checkbox" id="loop-sw" role="switch"><span></span></span>
+        </label>
+      </div>
+      <div class="row">
+        <button class="btn" data-action="zoom-out">Zoom -</button>
+        <button class="btn" data-action="zoom-in">Zoom +</button>
+        <button class="btn" data-action="fit">Fit</button>
+        <button class="btn" data-action="labels" style="flex:1.1;--b:#2A2418;--f:#FCD34D">Labels</button>
+      </div>
+
+      <h2>Timing</h2>
+      <div class="row param" data-param="duration">
+        <label for="p-duration">Length <small>s</small></label>
+        <input id="p-duration" type="range" min="0" max="1" step="any">
+        <input type="number" class="num" step="any" inputmode="decimal" aria-label="Length in seconds">
+      </div>
+      <div class="row param" data-param="end_x">
+        <label for="p-end_x">End X <small>s</small></label>
+        <input id="p-end_x" type="range" min="0" max="1" step="any">
+        <input type="number" class="num" step="any" inputmode="decimal" aria-label="End X in seconds">
+      </div>
+      <div class="row">
+        <label class="switch-row" style="flex:1">Cycle mode (graph repeats as tone)
+          <span class="switch"><input type="checkbox" id="cycle-sw" role="switch"><span></span></span>
+        </label>
+      </div>
+
+      <h2>Synth</h2>
+      <div class="row param" data-param="freq">
+        <label for="p-freq">Frequency <small>Hz</small></label>
+        <input id="p-freq" type="range" min="0" max="1" step="any">
+        <input type="number" class="num" step="any" inputmode="decimal" aria-label="Frequency in Hz">
+      </div>
+      <div class="row param" data-param="pitch">
+        <label for="p-pitch">Pitch <small>×</small></label>
+        <input id="p-pitch" type="range" min="0" max="1" step="any">
+        <input type="number" class="num" step="any" inputmode="decimal" aria-label="Pitch multiplier">
+      </div>
+      <div class="row param" data-param="fm_rate">
+        <label for="p-fm_rate">FM rate <small>Hz</small></label>
+        <input id="p-fm_rate" type="range" min="0" max="1" step="any">
+        <input type="number" class="num" step="any" inputmode="decimal" aria-label="FM rate in Hz">
+      </div>
+      <div class="row param" data-param="fm_depth">
+        <label for="p-fm_depth">FM depth <small>0–1</small></label>
+        <input id="p-fm_depth" type="range" min="0" max="1" step="any">
+        <input type="number" class="num" step="any" inputmode="decimal" aria-label="FM depth from 0 to 1">
+      </div>
+
+      <h2>Library</h2>
+      <div class="row tall">
+        <button class="btn" data-action="save" style="flex:1.4;--b:#221E35;--f:#A78BFA">Save to Library</button>
+        <button class="btn" data-action="library" style="--b:#221E35;--f:#A78BFA">Library</button>
+        <button class="btn" data-action="share" style="--b:#14332F;--f:#5EEAD4">Share</button>
+      </div>
+      <div class="row">
+        <button class="btn" data-action="new">New</button>
+        <button class="btn" data-action="import">Import JSON</button>
+        <input type="file" id="import-file" accept=".json,application/json" hidden>
+      </div>
+
+      <footer class="foot">
+        <span id="foot-version"></span> ·
+        <a href="https://github.com/OliverHaken/TraceTone">source</a> ·
+        <button class="linkish" data-action="help">shortcuts</button>
+      </footer>
+    </section>
+  </main>
+</div>
+<noscript><p class="noscript">TraceTone needs JavaScript.</p></noscript>
+</body>
+</html>

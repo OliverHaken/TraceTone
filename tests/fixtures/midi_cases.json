@@ -1,0 +1,32 @@
+[
+ {
+  "file": "midi_0.mid",
+  "freq": 220.0,
+  "duration": 1.0
+ },
+ {
+  "file": "midi_1.mid",
+  "freq": 330.0,
+  "duration": 0.3
+ },
+ {
+  "file": "midi_2.mid",
+  "freq": 27.5,
+  "duration": 2.0
+ },
+ {
+  "file": "midi_3.mid",
+  "freq": 5000.0,
+  "duration": 0.001
+ },
+ {
+  "file": "midi_4.mid",
+  "freq": 13.75,
+  "duration": 20.0
+ },
+ {
+  "file": "midi_5.mid",
+  "freq": 261.63,
+  "duration": 0.5
+ }
+]
